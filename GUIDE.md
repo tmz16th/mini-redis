@@ -1,19 +1,5 @@
-# mini-redis, explained from scratch
-
-This is a plain-English guide to how the project works and why each piece is
-here. Read it alongside the code in `src/store.rs` and `src/main.rs`.
-
----
-
-## 0. Why the port was busy
-
-Think of `127.0.0.1:6379` as a **phone number**. Only one program can pick up
-that phone at a time.
-
-If a server is already running when you do `cargo run`, your new server tries
-to pick up a phone that is already ringing. Rust gets told "no", and says
-`Address already in use`.
-
+# mini-redis, explained
+r
 | Situation | What to do |
 |---|---|
 | Normal way to stop your server | Press **Ctrl+C** in the terminal where it's running |
@@ -24,7 +10,7 @@ to pick up a phone that is already ringing. Rust gets told "no", and says
 
 ---
 
-## 1. What are we actually building?
+## 1. What am i actually building?
 
 A **key-value store** is a fancy name for **a labelled toy box**.
 
@@ -369,6 +355,3 @@ phone line. Type `PING`, press Enter, get `PONG`.
 | Try something risky | `git checkout -b <name>` |
 
 ---
-
-If any single bit is still fuzzy — the borrow checker, `Arc`/`RwLock`, WAL, or
-why `apply_set` exists — zoom in on just that bit and ask.
