@@ -3,3 +3,6 @@ target/
 
 # Write-ahead log created when the server runs
 *.wal
+
+# Personal local notes (not part of the project)
+.guide.md

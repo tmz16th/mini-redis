@@ -4,8 +4,6 @@ A small key-value store written in Rust, built up in stages. Inspired by [Redis]
 
 A key-value store is a dictionary that lives outside your program: other processes (or other machines) can connect to it and ask it to store, retrieve, and delete values by key.
 
-New to the project? [GUIDE.md](./GUIDE.md) explains the whole thing from scratch in plain English — the Rust concepts, the write-ahead log, and the commands you'll use.
-
 ## Current state (stage 3)
 
 - In-memory `HashMap<String, String>` storage
