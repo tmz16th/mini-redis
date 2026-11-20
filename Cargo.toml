@@ -2,5 +2,7 @@
 name = "mini-redis"
 version = "0.1.0"
 edition = "2024"
+# Two binaries exist now; keep bare `cargo run` starting the server.
+default-run = "mini-redis"
 
 [dependencies]

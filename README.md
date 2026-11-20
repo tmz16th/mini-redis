@@ -12,19 +12,28 @@ A key-value store is a dictionary that lives outside your program: other process
 - Torn final records from a crash mid-write are discarded and truncated on startup
 - TCP server on `127.0.0.1:6379`
 - One thread per client, with the store shared behind `Arc<RwLock<Store>>`
-- Simple newline-delimited text protocol, so you can talk to it with `nc`
+- Simple newline-delimited text protocol
 
 ## Running
 
-```sh
-cargo run --release
-```
-
-In another terminal:
+Start the server in one terminal:
 
 ```sh
-nc localhost 6379
+cargo run
 ```
+
+In a second terminal, start the interactive client:
+
+```sh
+cargo run --bin client
+```
+
+The server prints `listening on 127.0.0.1:6379` and then waits quietly — that's
+normal. Press Ctrl+C in the server terminal to stop it. If a server is already
+running, `cargo run` will fail with "Address already in use".
+
+Any other program that speaks the protocol can connect too — for example with
+`nc localhost 6379` if you have netcat installed.
 
 ## Commands
 
