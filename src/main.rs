@@ -15,7 +15,8 @@ type SharedStore = Arc<RwLock<Store>>;
 fn main() -> std::io::Result<()> {
     // Arc = many threads can own the same store.
     // RwLock = many readers at once, but only one writer at a time.
-    let store: SharedStore = Arc::new(RwLock::new(Store::new()));
+    // Replay the log before accepting any clients.
+    let store: SharedStore = Arc::new(RwLock::new(Store::open("mini-redis.wal")?));
 
     let listener = TcpListener::bind(ADDR)?;
     println!("mini-redis listening on {ADDR}");
@@ -62,10 +63,13 @@ fn handle_client(stream: TcpStream, store: SharedStore) -> std::io::Result<()> {
             "PING" => "PONG\n".to_string(),
             "SET" => match args.as_slice() {
                 [_, key, value] => {
-                    // write() blocks until no readers are active.
+                    // write() blocks until no readers are active. The disk
+                    // write happens while we hold it, so writes stay serialized.
                     let mut s = store.write().unwrap();
-                    s.set((*key).to_string(), (*value).to_string());
-                    "OK\n".to_string()
+                    match s.set((*key).to_string(), (*value).to_string()) {
+                        Ok(()) => "OK\n".to_string(),
+                        Err(e) => format!("ERR failed to persist: {e}\n"),
+                    }
                 }
                 _ => "ERR usage: SET <key> <value>\n".to_string(),
             },
@@ -83,10 +87,10 @@ fn handle_client(stream: TcpStream, store: SharedStore) -> std::io::Result<()> {
             "DEL" => match args.as_slice() {
                 [_, key] => {
                     let mut s = store.write().unwrap();
-                    if s.remove(key).is_some() {
-                        "1\n".to_string()
-                    } else {
-                        "0\n".to_string()
+                    match s.remove(key) {
+                        Ok(Some(_)) => "1\n".to_string(),
+                        Ok(None) => "0\n".to_string(),
+                        Err(e) => format!("ERR failed to persist: {e}\n"),
                     }
                 }
                 _ => "ERR usage: DEL <key>\n".to_string(),

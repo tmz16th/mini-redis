@@ -1,2 +1,5 @@
 # Rust build output
 target/
+
+# Write-ahead log created when the server runs
+*.wal
