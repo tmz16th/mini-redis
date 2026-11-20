@@ -9,6 +9,7 @@ A key-value store is a dictionary that lives outside your program: other process
 - In-memory `HashMap<String, String>` storage
 - Append-only write-ahead log (WAL): every write is logged and synced to disk before memory is updated
 - Log is replayed on startup, so data survives restarts
+- Torn final records from a crash mid-write are discarded and truncated on startup
 - TCP server on `127.0.0.1:6379`
 - One thread per client, with the store shared behind `Arc<RwLock<Store>>`
 - Simple newline-delimited text protocol, so you can talk to it with `nc`

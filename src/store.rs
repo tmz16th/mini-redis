@@ -32,6 +32,7 @@ impl Store {
     }
 
     /// A store with no persistence, for tests and benchmarks.
+    #[cfg(test)]
     pub fn in_memory() -> Self {
         Self {
             data: HashMap::new(),
@@ -45,14 +46,27 @@ impl Store {
     /// which would append them to the log a second time.
     fn replay(&mut self, file: &File) -> io::Result<()> {
         let mut reader = BufReader::new(file);
-        let mut line = String::new();
+        let mut bytes = Vec::new();
+        let mut good_bytes = 0u64;
+        let mut torn = false;
 
         loop {
-            line.clear();
-            if reader.read_line(&mut line)? == 0 {
+            bytes.clear();
+            let n = reader.read_until(b'\n', &mut bytes)?;
+            if n == 0 {
                 break;
             }
 
+            if !bytes.ends_with(b"\n") {
+                // A crash halfway through a write left an incomplete record.
+                // Everything before it is still valid. Work in bytes because
+                // a torn write can also split a multi-byte UTF-8 character.
+                eprintln!("warning: incomplete log record at end, truncating");
+                torn = true;
+                break;
+            }
+
+            let line = String::from_utf8_lossy(&bytes);
             let args: Vec<&str> = line.trim().split_whitespace().collect();
             match args.as_slice() {
                 ["SET", key, value] => self.apply_set((*key).into(), (*value).into()),
@@ -61,6 +75,11 @@ impl Store {
                 }
                 _ => eprintln!("warning: skipping malformed log record: {:?}", line.trim()),
             }
+            good_bytes += n as u64;
+        }
+
+        if torn {
+            file.set_len(good_bytes)?;
         }
 
         Ok(())
@@ -105,7 +124,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::Store;
-    use std::{fs, path::PathBuf};
+    use std::{fs, io::Write, path::PathBuf};
 
     fn log_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("mini-redis-{name}-{}.wal", std::process::id()))
@@ -162,6 +181,39 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
         assert_eq!(store.get("name"), None);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn torn_record_is_discarded_on_restart() {
+        let path = log_path("torn");
+        {
+            let mut file = fs::File::create(&path).unwrap();
+            file.write_all(b"SET good value\nSET bad hal").unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.get("good"), Some("value"));
+        assert_eq!(store.get("bad"), None);
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "SET good value\n");
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn torn_utf8_record_is_discarded_on_restart() {
+        let path = log_path("torn-utf8");
+        {
+            let mut file = fs::File::create(&path).unwrap();
+            // 0xc3 is the first half of the UTF-8 encoding of 'é'.
+            file.write_all(b"SET good value\nSET key \xc3").unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.get("good"), Some("value"));
+        assert_eq!(store.get("key"), None);
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "SET good value\n");
         fs::remove_file(&path).unwrap();
     }
 
