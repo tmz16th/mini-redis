@@ -21,7 +21,7 @@ fn main() -> io::Result<()> {
     let mut input = String::new();
 
     println!("connected to {ADDR}");
-    println!("commands: PING | SET <key> <value> | GET <key> | DEL <key> | QUIT");
+    println!("commands: PING | SET <key> <value> [EX <seconds>] | GET <key> | DEL <key> | QUIT");
 
     loop {
         print!("> ");

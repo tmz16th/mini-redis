@@ -5,6 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{Arc, RwLock},
     thread,
+    time::Duration,
 };
 
 use store::Store;
@@ -17,6 +18,14 @@ fn main() -> std::io::Result<()> {
     // RwLock = many readers at once, but only one writer at a time.
     // Replay the log before accepting any clients.
     let store: SharedStore = Arc::new(RwLock::new(Store::open("mini-redis.wal")?));
+
+    // Expired keys already read as (nil). This helper just frees the memory
+    // once a second, so stale entries don't pile up forever.
+    let purger = Arc::clone(&store);
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(1));
+        purger.write().unwrap().purge_expired();
+    });
 
     let listener = TcpListener::bind(ADDR)?;
     println!("mini-redis listening on {ADDR}");
@@ -61,18 +70,35 @@ fn handle_client(stream: TcpStream, store: SharedStore) -> std::io::Result<()> {
 
         let response = match command.to_ascii_uppercase().as_str() {
             "PING" => "PONG\n".to_string(),
-            "SET" => match args.as_slice() {
-                [_, key, value] => {
-                    // write() blocks until no readers are active. The disk
-                    // write happens while we hold it, so writes stay serialized.
-                    let mut s = store.write().unwrap();
-                    match s.set((*key).to_string(), (*value).to_string()) {
-                        Ok(()) => "OK\n".to_string(),
-                        Err(e) => format!("ERR failed to persist: {e}\n"),
+            "SET" => {
+                let parsed = match args.as_slice() {
+                    [_, key, value] => Ok((*key, *value, None)),
+                    [_, key, value, "EX", seconds] => match seconds.parse::<u64>() {
+                        Ok(n) => Ok((*key, *value, Some(Duration::from_secs(n)))),
+                        Err(_) => Err("ERR invalid expiry\n".to_string()),
+                    },
+                    _ => Err("ERR usage: SET <key> <value> [EX <seconds>]\n".to_string()),
+                };
+
+                match parsed {
+                    Ok((key, value, ttl)) => {
+                        // write() blocks until no readers are active. The disk
+                        // write happens while we hold it, so writes stay serialized.
+                        let mut s = store.write().unwrap();
+                        let result = match ttl {
+                            Some(duration) => {
+                                s.set_with_expiry(key.to_string(), value.to_string(), Some(duration))
+                            }
+                            None => s.set(key.to_string(), value.to_string()),
+                        };
+                        match result {
+                            Ok(()) => "OK\n".to_string(),
+                            Err(e) => format!("ERR failed to persist: {e}\n"),
+                        }
                     }
+                    Err(message) => message,
                 }
-                _ => "ERR usage: SET <key> <value>\n".to_string(),
-            },
+            }
             "GET" => match args.as_slice() {
                 [_, key] => {
                     // read() allows other readers in parallel.

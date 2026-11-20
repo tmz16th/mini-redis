@@ -12,6 +12,9 @@ A key-value store is a dictionary that lives outside your program: other process
 - Torn final records from a crash mid-write are discarded and truncated on startup
 - TCP server on `127.0.0.1:6379`
 - One thread per client, with the store shared behind `Arc<RwLock<Store>>`
+- Optional key expiry with `SET key value EX <seconds>`; deadlines are stored
+  in the log so a restart doesn't reset the timer
+- Lazy expiry on read plus a background sweep to free memory
 - Simple newline-delimited text protocol
 
 ## Running
@@ -41,11 +44,14 @@ Any other program that speaks the protocol can connect too — for example with
 | --- | --- | --- |
 | `PING` | `PING` | `PONG` |
 | `SET` | `SET name Ted` | `OK` |
+| `SET ... EX` | `SET code 1234 EX 60` | `OK`; key disappears after 60 seconds |
 | `GET` | `GET name` | the value, or `(nil)` |
 | `DEL` | `DEL name` | `1` if removed, `0` otherwise |
 | `QUIT` | `QUIT` | closes the connection |
 
-Commands are case-insensitive. Values cannot contain spaces yet.
+Commands are case-insensitive. Values cannot contain spaces yet. Expired keys
+read as `(nil)` immediately, and a background thread removes them from memory
+once a second.
 
 ## Testing
 

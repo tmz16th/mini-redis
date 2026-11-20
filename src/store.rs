@@ -3,11 +3,36 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, Write},
     path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+/// A value plus an optional wall-clock deadline.
+struct Entry {
+    value: String,
+    expires_at: Option<SystemTime>,
+}
+
+impl Entry {
+    fn is_expired(&self) -> bool {
+        self.expires_at.is_some_and(|deadline| SystemTime::now() >= deadline)
+    }
+}
+
+/// Convert a deadline into milliseconds since the Unix epoch so it can be
+/// written to the log. An `Instant` would be meaningless after a restart.
+fn to_millis(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn from_millis(millis: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(millis)
+}
 
 /// The database: an in-memory map plus an append-only log on disk.
 pub struct Store {
-    data: HashMap<String, String>,
+    data: HashMap<String, Entry>,
     /// `None` for the in-memory stores used in tests.
     log: Option<BufWriter<File>>,
 }
@@ -69,7 +94,18 @@ impl Store {
             let line = String::from_utf8_lossy(&bytes);
             let args: Vec<&str> = line.trim().split_whitespace().collect();
             match args.as_slice() {
-                ["SET", key, value] => self.apply_set((*key).into(), (*value).into()),
+                // Old records written before expiry existed have no deadline.
+                ["SET", key, value] => self.apply_set((*key).into(), (*value).into(), None),
+                ["SET", key, value, "AT", millis] => match millis.parse::<u64>() {
+                    Ok(ms) => self.apply_set(
+                        (*key).into(),
+                        (*value).into(),
+                        Some(from_millis(ms)),
+                    ),
+                    Err(_) => {
+                        eprintln!("warning: bad expiry in log record: {:?}", line.trim())
+                    }
+                },
                 ["DEL", key] => {
                     self.apply_remove(key);
                 }
@@ -96,35 +132,73 @@ impl Store {
         Ok(())
     }
 
-    fn apply_set(&mut self, key: String, value: String) {
-        self.data.insert(key, value);
+    fn apply_set(&mut self, key: String, value: String, expires_at: Option<SystemTime>) {
+        self.data.insert(key, Entry { value, expires_at });
     }
 
     fn apply_remove(&mut self, key: &str) -> Option<String> {
-        self.data.remove(key)
+        let entry = self.data.remove(key)?;
+        if entry.is_expired() { None } else { Some(entry.value) }
     }
 
     /// Log first, then update memory: if the disk write fails, memory is unchanged.
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
-        self.append(format!("SET {key} {value}\n"))?;
-        self.apply_set(key, value);
+        self.set_with_expiry(key, value, None)
+    }
+
+    /// Set a key that disappears after `ttl`.
+    ///
+    /// The log stores an absolute deadline, not "60 seconds from now", so a
+    /// restart does not reset the timer.
+    pub fn set_with_expiry(
+        &mut self,
+        key: String,
+        value: String,
+        ttl: Option<Duration>,
+    ) -> io::Result<()> {
+        let expires_at = ttl.map(|duration| SystemTime::now() + duration);
+        let record = match expires_at {
+            Some(deadline) => format!("SET {key} {value} AT {}\n", to_millis(deadline)),
+            None => format!("SET {key} {value}\n"),
+        };
+
+        self.append(record)?;
+        self.apply_set(key, value, expires_at);
         Ok(())
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.data.get(key).map(String::as_str)
+        let entry = self.data.get(key)?;
+        if entry.is_expired() {
+            return None;
+        }
+        Some(&entry.value)
     }
 
     pub fn remove(&mut self, key: &str) -> io::Result<Option<String>> {
         self.append(format!("DEL {key}\n"))?;
         Ok(self.apply_remove(key))
     }
+
+    /// Remove entries whose deadline has passed. Returns how many were removed.
+    /// Expired keys already read as `None`; this just frees the memory.
+    pub fn purge_expired(&mut self) -> usize {
+        let before = self.data.len();
+        self.data.retain(|_, entry| !entry.is_expired());
+        before - self.data.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Store;
-    use std::{fs, io::Write, path::PathBuf};
+    use std::{
+        fs,
+        io::Write,
+        path::PathBuf,
+        thread::sleep,
+        time::{Duration, SystemTime},
+    };
 
     fn log_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("mini-redis-{name}-{}.wal", std::process::id()))
@@ -149,6 +223,73 @@ mod tests {
         store.set("a".into(), "1".into()).unwrap();
         store.set("a".into(), "2".into()).unwrap();
         assert_eq!(store.get("a"), Some("2"));
+    }
+
+    #[test]
+    fn key_with_expiry_reads_normally_before_deadline() {
+        let mut store = Store::in_memory();
+        store
+            .set_with_expiry("a".into(), "1".into(), Some(Duration::from_secs(60)))
+            .unwrap();
+        assert_eq!(store.get("a"), Some("1"));
+    }
+
+    #[test]
+    fn expired_key_reads_as_none() {
+        let mut store = Store::in_memory();
+        store
+            .set_with_expiry("a".into(), "1".into(), Some(Duration::from_millis(50)))
+            .unwrap();
+        assert_eq!(store.get("a"), Some("1"));
+        sleep(Duration::from_millis(100));
+        assert_eq!(store.get("a"), None);
+    }
+
+    #[test]
+    fn purge_expired_frees_memory() {
+        let mut store = Store::in_memory();
+        store.set("forever".into(), "1".into()).unwrap();
+        store
+            .set_with_expiry("short".into(), "2".into(), Some(Duration::from_millis(50)))
+            .unwrap();
+        sleep(Duration::from_millis(100));
+
+        assert_eq!(store.purge_expired(), 1);
+        assert_eq!(store.get("forever"), Some("1"));
+        assert_eq!(store.get("short"), None);
+        assert_eq!(store.purge_expired(), 0);
+    }
+
+    #[test]
+    fn expiry_survives_restart_without_reset() {
+        let path = log_path("expiry-restart");
+        let _ = fs::remove_file(&path);
+
+        {
+            let mut store = Store::open(&path).unwrap();
+            store
+                .set_with_expiry("code".into(), "1234".into(), Some(Duration::from_secs(60)))
+                .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.get("code"), Some("1234"));
+        let deadline = store.data["code"].expires_at.unwrap();
+        // Should still be roughly 60s away, not a fresh full minute.
+        let remaining = deadline.duration_since(SystemTime::now()).unwrap();
+        assert!(remaining < Duration::from_secs(60));
+        assert!(remaining > Duration::from_secs(55));
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn old_log_records_still_load() {
+        let path = log_path("old-format");
+        fs::write(&path, b"SET old value\n").unwrap();
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.get("old"), Some("value"));
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]
